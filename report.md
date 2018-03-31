@@ -118,13 +118,34 @@ c
 观查这个函数内部的函数名，可知大部分的初始化内容都在这个函数内部的子函数中完成:
 ![](assets/report-43b0e.png)
 
+
+
+
 这里挑几个能看懂的函数进行追踪分析。
 
-### `boot_cpu_init()`
+### `local_irq_disable`
+在开头部分525，526行有这两行代码:
+```c
+local_irq_disable();                                                   
+early_boot_irqs_disabled = true;
+```
+而在结尾部分(631,632行)有
+```c
+early_boot_irqs_disabled=false;                                           
+local_irq_enable();
+```
+说明为了内核初始化顺利，需要屏蔽IRQ信号（如键盘输入），防止cpu中断打断内核的初始化。具体实现时通过汇编代码实现：
+```c
+#define local_irq_disable() __asm__ __volatile__("cli": : :"memory")  
+#define local_irq_enable()  __asm__ __volatile__("sti": : :"memory")  
+```
+就是调用了cli与sti两个cpu指令来实现是否开启中断。
+
+### `boot_cpu_init`
 
 用断点之后list查看源码，如下图
 ![](assets/report-3b06b.png)
-可以看到这个函数激活CPU，并用一个int存储返回的cpu id，然后根据id调用四个函数将CPU标记为online, active, present, possible,这里查阅资料知，kernel cpu control将CPU core抽象为possible、present、online和active四种状态，刚好与这里相对应。
+可以看到这个函数激活CPU，初始启动cpu，并用一个int存储返回的cpu id，然后根据id调用四个函数将CPU标记为online, active, present, possible,这里查阅资料知，kernel cpu control将CPU core抽象为possible、present、online和active四种状态，刚好与这里相对应。
 
 
 ### `setup_arch`
@@ -136,13 +157,38 @@ c
 这是中断的初始化
 ![](assets/report-1ad93.png)
 ![](assets/report-1d02c.png)
-查看这些注释，反复提到IST和IDT，通过搜索得知IDT是中断描述符表（`Interrupt Descriptor Table`）缩写,这个表即是在保护模式下，表项扩为8字节的中断向量表，x86中普遍使用IDT。首先设置cpu entry areas，然后设置IDT的初始化，IST应该是指Interrupt Service Threads（这个是msdn上查来的，百度上查到的中断服务表太诡异了，而且Google上找不到相应的内容），然后执
-行对其的init。
+查看这些注释，反复提到IST和IDT，通过搜索得知IDT是中断描述符表（`Interrupt Descriptor Table`）缩写,这个表即是在保护模式下，表项扩为8字节的中断向量表，x86中普遍使用IDT。首先设置cpu entry areas，然后设置IDT的初始化，IST应该是指Interrupt Service Threads（这个是msdn上查来的，百度上查到的中断服务表太诡异了，而且Google上找不到相应的内容），然后执行对其的init。
 
-### 其他
+（其他很多部件的init这里就跳过了)
+## rest_init
+在内核各个部件初始化后在main函数最后调用rest_init函数。
+![](assets/report-18471.png)
+这里也只挑一部分进行分析。
+### `kernel_thread`
 
-其他函数太多了，比如rest_init()time_init()console_init()之类，这里就不一一分析了。
+```c
+pid = kernel_thread(kernel_init, NULL, CLONE_FS);
+```
+根据注释这个进程就是pid 1的init进程，是linux中的一个特殊进程，在下面有一个类似的函数调用，那里创建了pid为2的kthreadd，kernel_thread函数的源码即是简单地调用函数fork一个进程然后再把pid返回。
+![](assets/report-e1463.png)
 
+可以具体看一下kernel init的函数内容，这个函数就在`init/main.c`中，具体是进行更高阶的初始化工作，具体干的事情很多，比如清除一部分初始化程序占用的内存，比如`try_to_run_init_process("/sbin/init")`，而众所周知`/sbin/init`是第一个用户进程。
+
+###  `schedule_preempt_disabled`
+这个函数在初始化特殊的进程之后，调用schedule()进行进程调度，使核心进程能够顺利进行。
+![](assets/report-dbcd4.png)
+其源代码如下,在中间调用了schedule()。
+```c
+void __sched schedule_preempt_disabled(void)
+{
+    sched_preempt_enable_no_resched();  
+    schedule();
+    preempt_disable();  
+}
+```
+
+### `cpu_idle_loop`
+可以看到rest_init()在最后会调用cpu_idle_loop()，这个函数在`kernel/sched/idle.c`中，并且是一个死循环，然后这就成为了pid 0的`idle process`，这个进程优先级是最低的，在cpu空闲时才会运行它。
 
 ## 实验小结
 这次实验可以说在配置实验环境上是相当麻烦了，光是内核就完整编译了三次（无比漫长的等待），还有wsl下各种缺库，而且运行独立的窗口还需要特别的环境，查了不少的资料。
